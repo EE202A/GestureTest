@@ -1,0 +1,116 @@
+#!/usr/bin/env python
+
+# Required libraries
+import socket
+import sys
+import signal
+import os
+import struct
+import rospy
+from sensor_msgs.msg import Range
+from geometry_msgs.msg import PointStamped
+from ntb_anchor.msg import NTBTiming
+import std_srvs.srv
+import traceback
+
+
+# Handle CTRL+C
+def sys_exit_handler(signal, frame):
+#    print "Debug::sys handler closing socket"
+    sock.close()
+    sys.exit(0)
+
+# Generator function to read lines
+def readlines(sock, recv_buffer=64, delim='\n'):
+    buffer = ''
+    data = True
+    while data:
+        data = sock.recv(recv_buffer)
+        buffer += data
+        while buffer.find(delim) != -1:
+            line, buffer = buffer.split('\n', 1)
+            yield line
+    return
+
+def send_position(event):
+    # Package up some information about this  anchor
+    msg_p.header.stamp = rospy.Time.now()
+    msg_p.header.frame_id = rospy.get_param('~uuid', 'not set')
+    msg_p.point.x = rospy.get_param('~x', 0)
+    msg_p.point.y = rospy.get_param('~y', 0)
+    msg_p.point.z = rospy.get_param('~z', 0)
+    pub_p.publish(msg_p)
+
+# advertised service to send a TWR message
+def sendtwr(self):
+    rospy.logdebug("sendtwr called @ %s\n", rospy.get_param('~uuid'))
+    # send TWR one-shot command
+    values = (ord('R'), ord('1'), ord('0'))
+    packer = struct.Struct('! B B B')
+    packed_data = packer.pack(*values)
+    sock.sendall(packed_data)
+    return std_srvs.srv.EmptyResponse()
+
+def anchor():   
+
+    # Setup a callback timer to broadcast position information
+    rospy.Timer(rospy.Duration(1), send_position)
+    
+    # Assign ctrl-c handler to cleanly exit
+    signal.signal(signal.SIGINT, sys_exit_handler)
+
+    try:
+        # send range stream command
+        values = (ord('R'), ord('s'), ord('0'))
+        packer = struct.Struct('! B B B')
+        packed_data = packer.pack(*values)
+        sock.sendall(packed_data)
+
+        # read all timing information from node
+        for line in readlines(sock):
+            try:
+                tokens  = line.split(',')
+                msg_t.header.stamp = rospy.Time.now()
+                msg_t.src = int(tokens[2])
+                msg_t.dst = int(tokens[0])
+                msg_t.seq = int(tokens[3])
+                msg_t.ts1 = long(tokens[4]);
+                msg_t.ts2 = long(tokens[5]);
+                msg_t.ts3 = long(tokens[6]);
+                msg_t.ts4 = long(tokens[7]);
+                msg_t.ts5 = long(tokens[8]);
+                msg_t.ts6 = long(tokens[9]);
+                msg_t.fploss = int(tokens[12])/-100.0
+                pub_t.publish(msg_t)
+            except Exception as e:
+                print "Debug::anchor excpt2", e
+    finally:
+#      print "Debug::anchor excpt1 "
+    
+    # Wait until ctrl+C
+    rospy.spin()
+
+# Main entry point of script
+if __name__ == '__main__':
+    try:
+        # init anchor
+        rospy.init_node('anchor', anonymous=True)
+        # publisher objects
+        pub_p = rospy.Publisher('~/anchor', PointStamped, queue_size=100)
+        pub_t = rospy.Publisher('~/ntbtiming', NTBTiming, queue_size=100)
+        msg_p = PointStamped()
+        msg_t = NTBTiming()
+        # subscriber objects
+        rospy.Service("~sendtwr", std_srvs.srv.Empty, sendtwr)
+        # network socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Create a TCP/IP socket and begin streaming
+        server_address = (rospy.get_param('~addr'), rospy.get_param('~port',23458))
+        sock.connect(server_address)
+        # stream data from the anchor
+        anchor()
+    except Exception, e:
+        print "Debug::exception catched"
+        traceback.print_exc()
+        print "Debug::closing socket"
+        sock.close()
