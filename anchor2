@@ -1,0 +1,190 @@
+#!/usr/bin/env python
+
+# Required libraries
+import socket
+import sys
+import signal
+import os
+import struct
+import rospy
+import time
+import copy
+from sensor_msgs.msg import Range
+from geometry_msgs.msg import PointStamped
+from ntb_anchor.msg import NTBTiming
+from ntb_pointing.ranging import ntb_score
+import std_srvs.srv
+import traceback
+
+local_history_data = []
+global_history_data = []
+yingnan_flag = True
+
+
+# Handle CTRL+C
+def sys_exit_handler(signal, frame):
+    print "Debugging::closing socket, ctrl+C by user input"
+    sock.shutdown(socket.SHUT_RDWR)
+    sock.close()
+    sys.exit(0)
+
+# Generator function to read lines
+def readlines(sock, recv_buffer=64, delim='\n'):
+    buffer = ''
+    data = ''
+    while yingnan_flag:
+        try:
+            data = sock.recv(recv_buffer)
+        except socket.timeout:
+            print "Debugging:: recved a timeout"    
+        buffer += data
+        # print "debugging:: data recved from node ", uuid, ": ", buffer
+        while buffer.find(delim) != -1:
+            line, buffer = buffer.split('\n', 1)
+            yield line
+    
+    return
+
+# advertised service to send a TWR message
+def sendtwr(self):
+    rospy.logdebug("sendtwr called @ %s\n", rospy.get_param('~uuid'))
+    # send TWR one-shot command
+    values = (ord('R'), ord('1'), ord('0'))
+    packer = struct.Struct('! B B B')
+    packed_data = packer.pack(*values)
+    sock.sendall(packed_data)
+    return std_srvs.srv.EmptyResponse()
+
+
+def ntb_timing_cb(data):
+    global global_history_data
+    global_history_data.append(data)
+
+def terminate_data_streaming(event):
+    global yingnan_flag
+    yingnan_flag = False
+
+def ledon():
+    values = (ord('L'), ord('1'), ord('R'))
+    packer = struct.Struct('! B B B')
+    packed_data = packer.pack(*values)
+    sock.sendall(packed_data)
+
+def ledoff():
+    values =(ord('L'), ord('0'), ord('R'))
+    packer = struct.Struct('! B B B')
+    packed_data = packer.pack(*values)
+    sock.sendall(packed_data)
+def startCalc(start_time):
+	global local_history_data
+    global global_history_data
+	print "[Debugging]:: local_history_data for ",uuid,"=", len(local_history_data)
+	print "[Debugging]:: starting time for node ", uuid, " = ", time.time()
+    
+    data_engine = ntb_score(ord(uuid[0]) - 97, local_history_data)
+    score = 10;
+    if data_engine.find_valley():
+        print "[Debugging]:: valley found for node ", uuid, " = ", time.time()
+        score = data_engine.get_score(global_history_data)
+        print "[Debugging] score is ", score, " for node ", uuid
+        return 
+    else:
+        return 
+
+    # print "[Debugging]::finishing time for node ", uuid, " = ", time.time()
+
+def anchor():   
+
+    global local_history_data
+    global global_history_data
+
+    # Assign ctrl-c handler to cleanly exit
+    signal.signal(signal.SIGINT, sys_exit_handler)
+    rospy.Timer(rospy.Duration(6), terminate_data_streaming, oneshot=True)
+    
+
+    # print "Debugging:: shi wu zhi da diao"
+    print "Debugging:: turning off led light -- ", uuid
+    ledoff()
+    try:
+        # send range stream command
+        values = (ord('R'), ord('s'), ord('0'))
+        packer = struct.Struct('! B B B')
+        packed_data = packer.pack(*values)
+        sock.sendall(packed_data)
+
+        prev_time = rospy.Time.now()
+        duration = 3
+        step = 1
+        # read all timing information from node
+        for line in readlines(sock):
+            try:
+                tokens  = line.split(',')
+                cur_time = rospy.Time.now()
+                msg_t.header.stamp = rospy.Time.now()
+                msg_t.src = int(tokens[2])
+                msg_t.dst = int(tokens[0])
+                msg_t.seq = int(tokens[3])
+                msg_t.ts1 = long(tokens[4])
+                msg_t.ts2 = long(tokens[5])
+                msg_t.ts3 = long(tokens[6])
+                msg_t.ts4 = long(tokens[7])
+                msg_t.ts5 = long(tokens[8])
+                msg_t.ts6 = long(tokens[9])
+                msg_t.fploss = int(tokens[12])/-100.0
+                local_history_data.append(copy.deepcopy(msg_t))
+                pub_t.publish(msg_t)
+                if curtime - prev_time >= step:
+                	startCalc(curtime - duration)
+            except Exception as e:
+                print "[Debuging]:: error reading from ntb node", e
+    finally:
+        pass
+
+    print "[Debugging]:: closing socket"
+    sock.shutdown(socket.SHUT_RDWR)
+    sock.close()
+    
+    # for data in local_history_data:
+    #     pub_t.publish(data)
+
+    # print "[Debugging]:: data published"
+    # Wait until ctrl+C
+    # time.sleep(3)
+    # print "[Debugging]:: global data recved for node", uuid, "= ", len(global_history_data)
+    
+    
+
+    # rospy.spin()
+
+# Main entry point of script
+if __name__ == '__main__':
+    try:
+        # init anchor
+        rospy.init_node('anchor', anonymous=True)
+
+        global uuid
+        uuid = rospy.get_param('~uuid')
+        print "Debugging:: node", uuid, "starting"
+        # publisher objects
+        print "Debugging:: registering publisher for node ", uuid
+        pub_t = rospy.Publisher('~/ntbtiming', NTBTiming, queue_size=500)
+        print "Debugging:: registering subscriber for node ", uuid
+        rospy.Subscriber('~/ntbtiming', NTBTiming, ntb_timing_cb)
+
+        msg_t = NTBTiming()
+        # network socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        # Create a TCP/IP socket and begin streaming
+        server_address = (rospy.get_param('~addr'), rospy.get_param('~port',23458))
+        sock.connect(server_address)
+
+        # stream data from the anchor
+        anchor()
+
+    except Exception, e:
+        print "Debug::exception catched in main function for node", uuid
+        traceback.print_exc()
+        print "Debug::closing socket for node", uuid
+        sock.close()
